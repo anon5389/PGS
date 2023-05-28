@@ -14,13 +14,11 @@ def load_top_observations(x, y, top_k):
 
     return top_observations, top_vals
 
-
 def step(observation, action, surrogate, scale=10, device=device):
     grads = get_grads(observation, surrogate, device=device)
     next_observation = observation + action * scale * grads 
     
     return next_observation
-
 
 def generate_designs(policy, surrogate, start_observations, scale=10,
             max_traj_length=50, deterministic=True, device=device):
@@ -39,18 +37,17 @@ def generate_designs(policy, surrogate, start_observations, scale=10,
     return next_observation
 
 def load_y(task_name):
-    global y_min
-    global y_max
     dic2y = np.load("npy/dic2y.npy", allow_pickle=True).item()
     y_min, y_max = dic2y[task_name]
-    print("y_min:", y_min)
-    print("y_max:", y_max)
 
-def evaluate_designs(task, x, discrete=False):
+    return y_min, y_max
+
+def oracle_evaluate_designs(task, task_name, x, discrete=False):
     if discrete:
         x = x.astype(np.int64)
     else:
         x = task.denormalize_x(x)
+    y_min, y_max = load_y(task_name)
  
     y = task.predict(x)
     max_y = (np.max(y)-y_min)/(y_max-y_min)

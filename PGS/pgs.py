@@ -1,6 +1,5 @@
 from copy import deepcopy
 import pickle
-import numpy as np
 import absl.app
 import absl.flags
 from .conservative_sac import ConservativeSAC
@@ -10,9 +9,9 @@ from .utils import Timer, define_flags_with_default, set_random_seed, get_user_f
 from .utils import WandBLogger
 from viskit.logging import logger, setup_logger
 from vae import train_vae
-from surrogate import prepare_dataloaders, get_surrogate, train_surrogate
+from surrogate import prepare_dataloaders, get_surrogate, train_surrogate, load_surrogate
 from generate_trajectories import generate_offline_dataset
-from evaluate_policy import load_top_observations, generate_designs, evaluate_designs
+from evaluate_policy import load_top_observations, generate_designs, oracle_evaluate_designs
 import design_bench
 import tensorflow as tf
 import numpy as np
@@ -23,6 +22,7 @@ FLAGS_DEF = define_flags_with_default(
     normalize_ys=True,
     normalize_xs=True,
 
+    train_surrogate = False,
     surrogate_hidden_size=2048, 
     surrogate_batch_size=128,
     surrgoate_epochs=50,
@@ -49,7 +49,9 @@ FLAGS_DEF = define_flags_with_default(
     policy_log_std_multiplier=1.0,
     policy_log_std_offset=-1.0,
 
-    n_epochs=300,
+    top_p=20,
+    n_epochs=401,
+    save_epoch=50,
     bc_epochs=0,
     n_train_step_per_epoch=1000,
     eval_period=10,
@@ -100,10 +102,22 @@ def main(argv):
     y = np.array(y)
 
     train_loader, val_loader = prepare_dataloaders(x, y , batch_size=FLAGS.surrogate_batch_size)
-    surrogate = get_surrogate(x.shape[1], FLAGS.surrogate_hidden_size)
-    surrogate = train_surrogate(surrogate, train_loader, val_loader, task_name, 
-                                n_epochs=FLAGS.surrogate_epochs, lr=FLAGS.surrogate_lr, device=FLAGS.device)
-    
+    if FLAGS.train_surrogate:
+        surrogate = get_surrogate(x.shape[1], FLAGS.surrogate_hidden_size)
+        surrogate = train_surrogate(surrogate, train_loader, val_loader, task_name, 
+                                    n_epochs=FLAGS.surrogate_epochs, lr=FLAGS.surrogate_lr, device=FLAGS.device)
+    else:
+        surrogate_path = "surrogate_models/"+task_name+"_surrogate.pt"
+        surrogate = load_surrogate(surrogate_path, x.shape[1], FLAGS.surrogate_hidden_size)
+    perc = np.percentile(y, 100 - FLAGS.top_p)
+    indices = np.where(y[:,0]>=perc)[0]
+    x = x[indices]
+    y = y[indices]
+    start_observations = load_top_observations(x, y, FLAGS.top_k)
+    if task.is_discrete:
+        scale = 2.0 * np.sqrt(x.shape[1])
+    else:
+        scale = 0.05 * np.sqrt(x.shape[1])
     dataset = generate_offline_dataset(x, y, surrogate, task_name, 
                                 size=FLAGS.trajectory_length, length=FLAGS.n_trajectories)
 
@@ -145,6 +159,8 @@ def main(argv):
     sac.torch_to_device(FLAGS.device)
 
     viskit_metrics = {}
+    all_designs = {}
+    oracle_scores = []
     for epoch in range(FLAGS.n_epochs):
         metrics = {'epoch': epoch}
 
@@ -154,13 +170,18 @@ def main(argv):
                 batch = batch_to_torch(batch, FLAGS.device)
                 metrics.update(prefix_metrics(sac.train(batch, bc=epoch < FLAGS.bc_epochs), 'sac'))
                 
-        if FLAGS.save_model:
-            if epoch%100==0 and epoch>0:
-                save_data = {'sac': sac, 'variant': variant, 'epoch': epoch}
-                wandb_logger.save_pickle(save_data, 'model_'+task_name+'_'+str(epoch)+'.pkl')
-            else:
-                save_data = {'sac': sac, 'variant': variant, 'epoch': epoch}
-                wandb_logger.save_pickle(save_data, 'model_'+task_name+'.pkl')
+        if epoch%FLAGS.save_epoch==0 and epoch>0:
+            save_data = {'sac': sac, 'variant': variant, 'epoch': epoch}
+            wandb_logger.save_pickle(save_data, 'model_'+task_name+'_'+str(epoch)+'.pkl')
+            designs = generate_designs(sac.policy, surrogate, start_observations, scale=scale,
+                                        max_traj_length=FLAGS.eval_length, deterministic=True, device=FLAGS.device)
+            if task.is_discrete:
+                designs = vae_model.decoder_cnn.predict(designs)
+                designs = tf.argmax(designs, axis=2, output_type=tf.int32)
+
+            score = oracle_evaluate_designs(task, task_name, designs, discrete=task.is_discrete)
+            oracle_scores.append(score)
+            all_designs[epoch] = designs
 
         metrics['train_time'] = train_timer()
         metrics['epoch_time'] = train_timer() 
@@ -169,16 +190,12 @@ def main(argv):
         logger.record_dict(viskit_metrics)
         logger.dump_tabular(with_prefix=False, with_timestamp=False)
 
-    start_observations = load_top_observations(x, y, FLAGS.top_k)
-    if task.is_discrete:
-        scale = 2.0 * np.sqrt(x.shape[1])
-    else:
-        scale = 0.05 * np.sqrt(x.shape[1])
-        
-    designs = generate_designs(sac.policy, surrogate, start_observations, scale=scale,
-            max_traj_length=FLAGS.eval_length, deterministic=True, device=FLAGS.device)
-    score = evaluate_designs(task, designs, discrete=task.is_discrete)
-    print("design score:", score)
+    with open(task_name+"_designs_top_"+str(100 - FLAGS.top_p), 'wb') as handle:
+        pickle.dump(all_designs, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    
+    with open(task_name+"_oracle_scores_top_"+str(100 - FLAGS.top_p), "wb") as fp:
+        pickle.dump(oracle_scores, fp)
+    
 
 if __name__ == '__main__':
     absl.app.run(main)

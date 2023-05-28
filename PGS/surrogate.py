@@ -1,3 +1,7 @@
+
+import os
+import sys
+import pickle
 import time
 import torch
 import numpy as np
@@ -117,9 +121,7 @@ def mean_squared_error(y_true, y_pred):
     
     return np.average(output_errors)   
 
-def load_model(path, input_shape):
-    hidden_size = 2048
-
+def load_surrogate(path, input_shape, hidden_size):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = NeuralNetwork(input_shape, hidden_size).to(device)
     
@@ -175,7 +177,7 @@ def train_surrogate(model, train_dataloader, val_dataloader, task_name, n_epochs
                 + ", test MSE = " + str(round(mean_squared_error(prediction_on_test['labels'], prediction_on_test['preds']), 4))
                 )
         
-        PATH = task_name+"_surrogate.pt"
+        PATH = "surrogate_models/"+task_name+"_surrogate.pt"
         torch.save({
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -183,3 +185,8 @@ def train_surrogate(model, train_dataloader, val_dataloader, task_name, n_epochs
 
         return model
 
+
+
+if __name__ == '__main__':
+    dataset_names = ["AntMorphology", "DKittyMorphology", "HopperController", "Superconductor"]
+    # dataset_names = ['TFBind8', 'GFP', 'UTR']
